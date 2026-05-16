@@ -22,6 +22,7 @@ use std::{fmt::Display, sync::Arc};
 use tokio::time::{sleep, timeout, Duration};
 
 const ITERATION_TIMEOUT_FLOOR: Duration = Duration::from_secs(10);
+const SERVER_RETRY_BACKOFF_BUDGET: Duration = Duration::from_secs(7);
 
 pub enum WatcherType {
     Idle,
@@ -37,7 +38,14 @@ impl WatcherType {
     }
 
     fn iteration_timeout(&self, config: &Config) -> Duration {
-        self.sleep_time(config).max(ITERATION_TIMEOUT_FLOOR)
+        let retry_budget = if config.no_server {
+            Duration::ZERO
+        } else {
+            SERVER_RETRY_BACKOFF_BUDGET
+        };
+
+        self.sleep_time(config)
+            .max(ITERATION_TIMEOUT_FLOOR + retry_budget)
     }
 }
 
@@ -166,13 +174,40 @@ pub async fn run_first_supported(client: Arc<ReportClient>, watcher_type: &Watch
 
 #[cfg(test)]
 mod tests {
-    use super::{WatcherType, ITERATION_TIMEOUT_FLOOR};
-    use crate::config::Config;
+    use super::{WatcherType, ITERATION_TIMEOUT_FLOOR, SERVER_RETRY_BACKOFF_BUDGET};
+    use crate::config::{defaults, Config};
     use tokio::time::Duration;
+
+    fn test_config() -> Config {
+        Config {
+            port: defaults::port(),
+            host: defaults::host(),
+            api_key: None,
+            idle_timeout: chrono::TimeDelta::seconds(i64::from(defaults::idle_timeout_seconds())),
+            poll_time_idle: chrono::TimeDelta::seconds(i64::from(
+                defaults::poll_time_idle_seconds(),
+            )),
+            poll_time_window: chrono::TimeDelta::seconds(i64::from(
+                defaults::poll_time_window_seconds(),
+            )),
+            no_server: false,
+            filters: vec![],
+        }
+    }
 
     #[test]
     fn iteration_timeout_uses_floor_for_short_polling() {
-        let config = Config::default();
+        let config = test_config();
+        assert_eq!(
+            WatcherType::ActiveWindow.iteration_timeout(&config),
+            ITERATION_TIMEOUT_FLOOR + SERVER_RETRY_BACKOFF_BUDGET
+        );
+    }
+
+    #[test]
+    fn iteration_timeout_uses_base_floor_without_server_reporting() {
+        let mut config = test_config();
+        config.no_server = true;
         assert_eq!(
             WatcherType::ActiveWindow.iteration_timeout(&config),
             ITERATION_TIMEOUT_FLOOR
@@ -181,11 +216,11 @@ mod tests {
 
     #[test]
     fn iteration_timeout_uses_poll_time_when_longer_than_floor() {
-        let mut config = Config::default();
-        config.poll_time_idle = chrono::TimeDelta::seconds(15);
+        let mut config = test_config();
+        config.poll_time_idle = chrono::TimeDelta::seconds(20);
         assert_eq!(
             WatcherType::Idle.iteration_timeout(&config),
-            Duration::from_secs(15)
+            Duration::from_secs(20)
         );
     }
 }
