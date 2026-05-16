@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use std::{fmt::Display, sync::Arc};
 use tokio::time::{sleep, timeout, Duration};
 
+const ITERATION_TIMEOUT_FLOOR: Duration = Duration::from_secs(10);
+
 pub enum WatcherType {
     Idle,
     ActiveWindow,
@@ -32,6 +34,10 @@ impl WatcherType {
             WatcherType::Idle => config.poll_time_idle.to_std().unwrap(),
             WatcherType::ActiveWindow => config.poll_time_window.to_std().unwrap(),
         }
+    }
+
+    fn iteration_timeout(&self, config: &Config) -> Duration {
+        self.sleep_time(config).max(ITERATION_TIMEOUT_FLOOR)
     }
 }
 
@@ -139,14 +145,15 @@ pub async fn run_first_supported(client: Arc<ReportClient>, watcher_type: &Watch
         info!("Starting {watcher_type} watcher");
         loop {
             let sleep_time = watcher_type.sleep_time(&client.config);
+            let iteration_timeout = watcher_type.iteration_timeout(&client.config);
 
-            match timeout(sleep_time, watcher.run_iteration(&client)).await {
+            match timeout(iteration_timeout, watcher.run_iteration(&client)).await {
                 Ok(Ok(())) => { /* Successfully completed. */ }
                 Ok(Err(e)) => {
                     error!("Error on {watcher_type} iteration: {e}");
                 }
                 Err(_) => {
-                    error!("Timeout on {watcher_type} iteration after {sleep_time:?}");
+                    error!("Timeout on {watcher_type} iteration after {iteration_timeout:?}");
                 }
             }
 
@@ -155,4 +162,30 @@ pub async fn run_first_supported(client: Arc<ReportClient>, watcher_type: &Watch
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WatcherType, ITERATION_TIMEOUT_FLOOR};
+    use crate::config::Config;
+    use tokio::time::Duration;
+
+    #[test]
+    fn iteration_timeout_uses_floor_for_short_polling() {
+        let config = Config::default();
+        assert_eq!(
+            WatcherType::ActiveWindow.iteration_timeout(&config),
+            ITERATION_TIMEOUT_FLOOR
+        );
+    }
+
+    #[test]
+    fn iteration_timeout_uses_poll_time_when_longer_than_floor() {
+        let mut config = Config::default();
+        config.poll_time_idle = chrono::TimeDelta::seconds(15);
+        assert_eq!(
+            WatcherType::Idle.iteration_timeout(&config),
+            Duration::from_secs(15)
+        );
+    }
 }
