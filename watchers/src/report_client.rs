@@ -55,7 +55,7 @@ impl ReportClient {
         .any(|needle| message.contains(needle))
     }
 
-    async fn run_with_retries<F, Fut, T, E>(f: F) -> Result<T, E>
+    async fn run_with_retries<F, Fut, T, E>(f: F, warn_on_transient_retry: bool) -> Result<T, E>
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T, E>>,
@@ -65,10 +65,17 @@ impl ReportClient {
             match f().await {
                 Ok(val) => return Ok(val),
                 Err(e) if Self::is_transient_network_error(&e.to_string()) => {
-                    warn!(
-                        "Transient server communication error on attempt #{} (retry in {secs}s): {e}",
-                        attempt + 1
-                    );
+                    if warn_on_transient_retry {
+                        warn!(
+                            "Transient server communication error on attempt #{} (retry in {secs}s): {e}",
+                            attempt + 1
+                        );
+                    } else {
+                        debug!(
+                            "Transient server communication issue during startup on attempt #{} (retry in {secs}s): {e}",
+                            attempt + 1
+                        );
+                    }
 
                     tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
                 }
@@ -108,7 +115,7 @@ impl ReportClient {
                 .heartbeat(&self.idle_bucket_name, &event, pulsetime as f64)
         };
 
-        Self::run_with_retries(request)
+        Self::run_with_retries(request, true)
             .await
             .with_context(|| "Failed to send heartbeat")
     }
@@ -161,7 +168,7 @@ impl ReportClient {
             )
         };
 
-        Self::run_with_retries(request)
+        Self::run_with_retries(request, true)
             .await
             .with_context(|| "Failed to send heartbeat for active window")
     }
@@ -200,7 +207,7 @@ impl ReportClient {
     ) -> anyhow::Result<()> {
         let request = || client.create_bucket_simple(bucket_name, bucket_type);
 
-        Self::run_with_retries(request)
+        Self::run_with_retries(request, false)
             .await
             .with_context(|| format!("Failed to create bucket {bucket_name}"))
     }
