@@ -1,7 +1,7 @@
 use super::wl_connection::WlEventConnection;
 use super::{wl_connection::subscribe_state, Watcher};
 use crate::report_client::ReportClient;
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
