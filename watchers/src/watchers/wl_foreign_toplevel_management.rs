@@ -1,7 +1,7 @@
 use super::wl_connection::WlEventConnection;
 use super::{wl_connection::subscribe_state, Watcher};
 use crate::report_client::ReportClient;
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -124,23 +124,22 @@ pub struct WindowWatcher {
 
 impl WindowWatcher {
     async fn send_active_window(&self, client: &Arc<ReportClient>) -> anyhow::Result<()> {
-        let active_window_id = self
-            .toplevel_state
-            .current_window_id
-            .as_ref()
-            .ok_or(anyhow!("Current window is unknown"))?;
-        let active_window = self
-            .toplevel_state
-            .windows
-            .get(active_window_id)
-            .ok_or(anyhow!(
-                "Current window is not found by ID {active_window_id}"
-            ))?;
+        let active_window_id = self.toplevel_state.current_window_id.as_ref();
 
-        client
-            .send_active_window(&active_window.app_id, &active_window.title)
-            .await
-            .with_context(|| "Failed to send heartbeat for active window")
+        if let Some(active_window_id) = active_window_id {
+            if let Some(active_window) = self.toplevel_state.windows.get(active_window_id) {
+                client
+                    .send_active_window(&active_window.app_id, &active_window.title)
+                    .await
+                    .with_context(|| "Failed to send heartbeat for active window")
+            } else {
+                info!("Current window is not found by ID {active_window_id}, skipping sending heartbeat");
+                Ok(())
+            }
+        } else {
+            info!("Current active window is unknown, skipping sending heartbeat");
+            Ok(())
+        }
     }
 }
 

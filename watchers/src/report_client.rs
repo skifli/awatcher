@@ -40,6 +40,21 @@ impl ReportClient {
         })
     }
 
+    fn is_transient_network_error(message: &str) -> bool {
+        let message = message.to_lowercase();
+        [
+            "connection refused",
+            "connection closed before message completed",
+            "broken pipe",
+            "connection reset",
+            "timed out",
+            "timeout",
+            "incomplete message",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+    }
+
     async fn run_with_retries<F, Fut, T, E>(f: F) -> Result<T, E>
     where
         F: Fn() -> Fut,
@@ -49,11 +64,11 @@ impl ReportClient {
         for (attempt, &secs) in [1, 2, 4].iter().enumerate() {
             match f().await {
                 Ok(val) => return Ok(val),
-                Err(e)
-                    if e.to_string()
-                        .contains("tcp connect error: Connection refused") =>
-                {
-                    warn!("Failed to connect on attempt #{attempt}, retrying: {e}");
+                Err(e) if Self::is_transient_network_error(&e.to_string()) => {
+                    warn!(
+                        "Transient server communication error on attempt #{} (retry in {secs}s): {e}",
+                        attempt + 1
+                    );
 
                     tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
                 }
@@ -253,5 +268,26 @@ impl ReportClient {
             );
             self.ping(false, last_input_time, TimeDelta::zero()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReportClient;
+
+    #[test]
+    fn test_is_transient_network_error() {
+        assert!(ReportClient::is_transient_network_error(
+            "error sending request for url (...): connection closed before message completed"
+        ));
+        assert!(ReportClient::is_transient_network_error(
+            "Backend error: Io error: Broken pipe (os error 32)"
+        ));
+        assert!(ReportClient::is_transient_network_error(
+            "tcp connect error: Connection refused"
+        ));
+        assert!(!ReportClient::is_transient_network_error(
+            "HTTP status server error (500 Internal Server Error)"
+        ));
     }
 }
