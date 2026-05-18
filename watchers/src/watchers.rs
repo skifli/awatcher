@@ -24,6 +24,27 @@ use tokio::time::{sleep, timeout, Duration};
 const ITERATION_TIMEOUT_FLOOR: Duration = Duration::from_secs(10);
 const SERVER_RETRY_BACKOFF_BUDGET: Duration = Duration::from_secs(7);
 
+#[derive(Debug)]
+struct WaylandConnectionLost {
+    details: String,
+}
+
+impl WaylandConnectionLost {
+    fn new(details: impl Display) -> Self {
+        Self {
+            details: details.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for WaylandConnectionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Wayland connection lost: {}", self.details)
+    }
+}
+
+impl std::error::Error for WaylandConnectionLost {}
+
 pub enum WatcherType {
     Idle,
     ActiveWindow,
@@ -148,25 +169,45 @@ async fn filter_first_supported(
 }
 
 pub async fn run_first_supported(client: Arc<ReportClient>, watcher_type: &WatcherType) -> bool {
-    let supported_watcher = filter_first_supported(&client, watcher_type).await;
-    if let Some(mut watcher) = supported_watcher {
-        info!("Starting {watcher_type} watcher");
-        loop {
-            let sleep_time = watcher_type.sleep_time(&client.config);
-            let iteration_timeout = watcher_type.iteration_timeout(&client.config);
+    let mut watcher = filter_first_supported(&client, watcher_type).await;
+    if watcher.is_none() {
+        return false;
+    }
 
-            match timeout(iteration_timeout, watcher.run_iteration(&client)).await {
-                Ok(Ok(())) => { /* Successfully completed. */ }
-                Ok(Err(e)) => {
+    info!("Starting {watcher_type} watcher");
+    loop {
+        let sleep_time = watcher_type.sleep_time(&client.config);
+        let iteration_timeout = watcher_type.iteration_timeout(&client.config);
+
+        let Some(active_watcher) = watcher.as_mut() else {
+            watcher = filter_first_supported(&client, watcher_type).await;
+            if watcher.is_some() {
+                info!("Reconnected {watcher_type} watcher");
+            } else {
+                warn!(
+                    "No supported {watcher_type} watcher available, retrying after {sleep_time:?}"
+                );
+            }
+            sleep(sleep_time).await;
+            continue;
+        };
+
+        match timeout(iteration_timeout, active_watcher.run_iteration(&client)).await {
+            Ok(Ok(())) => { /* Successfully completed. */ }
+            Ok(Err(e)) => {
+                if e.downcast_ref::<WaylandConnectionLost>().is_some() {
+                    warn!("Wayland connection lost for {watcher_type}: {e}");
+                    watcher = None;
+                } else {
                     error!("Error on {watcher_type} iteration: {e}");
                 }
-                Err(_) => {
-                    error!("Timeout on {watcher_type} iteration after {iteration_timeout:?}");
-                }
             }
-
-            sleep(sleep_time).await;
+            Err(_) => {
+                error!("Timeout on {watcher_type} iteration after {iteration_timeout:?}");
+            }
         }
+
+        sleep(sleep_time).await;
     }
 
     false

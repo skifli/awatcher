@@ -1,6 +1,6 @@
 // This protocol extends ext_foreign_toplevel_v1
 use super::wl_connection::WlEventConnection;
-use super::{wl_connection::subscribe_state, Watcher};
+use super::{wl_connection::subscribe_state, Watcher, WaylandConnectionLost};
 use crate::report_client::ReportClient;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -265,7 +265,7 @@ impl Watcher for WindowWatcher {
 
         connection
             .roundtrip(&mut toplevel_state)
-            .map_err(|e| anyhow!("Event queue is not processed: {e}"))?;
+            .map_err(WaylandConnectionLost::new)?;
 
         Ok(Self {
             connection,
@@ -276,7 +276,7 @@ impl Watcher for WindowWatcher {
     async fn run_iteration(&mut self, client: &Arc<ReportClient>) -> anyhow::Result<()> {
         self.connection
             .roundtrip(&mut self.toplevel_state)
-            .map_err(|e| anyhow!("Event queue is not processed: {e}"))?;
+            .map_err(WaylandConnectionLost::new)?;
 
         self.send_active_window(client).await
     }

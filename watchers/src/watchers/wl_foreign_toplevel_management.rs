@@ -1,7 +1,7 @@
 use super::wl_connection::WlEventConnection;
-use super::{wl_connection::subscribe_state, Watcher};
+use super::{wl_connection::subscribe_state, Watcher, WaylandConnectionLost};
 use crate::report_client::ReportClient;
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,7 +151,9 @@ impl Watcher for WindowWatcher {
 
         let mut toplevel_state = ToplevelState::new();
 
-        connection.roundtrip(&mut toplevel_state).unwrap();
+        connection
+            .roundtrip(&mut toplevel_state)
+            .map_err(WaylandConnectionLost::new)?;
 
         Ok(Self {
             connection,
@@ -162,7 +164,7 @@ impl Watcher for WindowWatcher {
     async fn run_iteration(&mut self, client: &Arc<ReportClient>) -> anyhow::Result<()> {
         self.connection
             .roundtrip(&mut self.toplevel_state)
-            .map_err(|e| anyhow!("Event queue is not processed: {e}"))?;
+            .map_err(WaylandConnectionLost::new)?;
 
         self.send_active_window(client).await
     }
