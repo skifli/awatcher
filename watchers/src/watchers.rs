@@ -210,7 +210,7 @@ pub async fn run_first_supported(client: Arc<ReportClient>, watcher_type: &Watch
         sleep(sleep_time).await;
     }
 
-    false
+    unreachable!("Watcher loop exited unexpectedly");
 }
 
 #[cfg(test)]
