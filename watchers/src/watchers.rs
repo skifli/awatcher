@@ -21,6 +21,30 @@ use async_trait::async_trait;
 use std::{fmt::Display, sync::Arc};
 use tokio::time::{sleep, timeout, Duration};
 
+const ITERATION_TIMEOUT_FLOOR: Duration = Duration::from_secs(10);
+const SERVER_RETRY_BACKOFF_BUDGET: Duration = Duration::from_secs(7);
+
+#[derive(Debug)]
+struct WaylandConnectionLost {
+    details: String,
+}
+
+impl WaylandConnectionLost {
+    fn new(details: impl Display) -> Self {
+        Self {
+            details: details.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for WaylandConnectionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Wayland connection lost: {}", self.details)
+    }
+}
+
+impl std::error::Error for WaylandConnectionLost {}
+
 pub enum WatcherType {
     Idle,
     ActiveWindow,
@@ -32,6 +56,17 @@ impl WatcherType {
             WatcherType::Idle => config.poll_time_idle.to_std().unwrap(),
             WatcherType::ActiveWindow => config.poll_time_window.to_std().unwrap(),
         }
+    }
+
+    fn iteration_timeout(&self, config: &Config) -> Duration {
+        let retry_budget = if config.no_server {
+            Duration::ZERO
+        } else {
+            SERVER_RETRY_BACKOFF_BUDGET
+        };
+
+        self.sleep_time(config)
+            .max(ITERATION_TIMEOUT_FLOOR + retry_budget)
     }
 }
 
@@ -134,25 +169,99 @@ async fn filter_first_supported(
 }
 
 pub async fn run_first_supported(client: Arc<ReportClient>, watcher_type: &WatcherType) -> bool {
-    let supported_watcher = filter_first_supported(&client, watcher_type).await;
-    if let Some(mut watcher) = supported_watcher {
-        info!("Starting {watcher_type} watcher");
-        loop {
-            let sleep_time = watcher_type.sleep_time(&client.config);
+    let mut watcher = filter_first_supported(&client, watcher_type).await;
+    if watcher.is_none() {
+        return false;
+    }
 
-            match timeout(sleep_time, watcher.run_iteration(&client)).await {
-                Ok(Ok(())) => { /* Successfully completed. */ }
-                Ok(Err(e)) => {
+    info!("Starting {watcher_type} watcher");
+    loop {
+        let sleep_time = watcher_type.sleep_time(&client.config);
+        let iteration_timeout = watcher_type.iteration_timeout(&client.config);
+
+        let Some(active_watcher) = watcher.as_mut() else {
+            watcher = filter_first_supported(&client, watcher_type).await;
+            if watcher.is_some() {
+                info!("Reconnected {watcher_type} watcher");
+            } else {
+                warn!(
+                    "No supported {watcher_type} watcher available, retrying after {sleep_time:?}"
+                );
+            }
+            sleep(sleep_time).await;
+            continue;
+        };
+
+        match timeout(iteration_timeout, active_watcher.run_iteration(&client)).await {
+            Ok(Ok(())) => { /* Successfully completed. */ }
+            Ok(Err(e)) => {
+                if e.downcast_ref::<WaylandConnectionLost>().is_some() {
+                    warn!("Wayland connection lost for {watcher_type}: {e}");
+                    watcher = None;
+                } else {
                     error!("Error on {watcher_type} iteration: {e}");
                 }
-                Err(_) => {
-                    error!("Timeout on {watcher_type} iteration after {sleep_time:?}");
-                }
             }
+            Err(_) => {
+                error!("Timeout on {watcher_type} iteration after {iteration_timeout:?}");
+            }
+        }
 
-            sleep(sleep_time).await;
+        sleep(sleep_time).await;
+    }
+
+    unreachable!("Watcher loop exited unexpectedly");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WatcherType, ITERATION_TIMEOUT_FLOOR, SERVER_RETRY_BACKOFF_BUDGET};
+    use crate::config::{defaults, Config};
+    use tokio::time::Duration;
+
+    fn test_config() -> Config {
+        Config {
+            port: defaults::port(),
+            host: defaults::host(),
+            api_key: None,
+            idle_timeout: chrono::TimeDelta::seconds(i64::from(defaults::idle_timeout_seconds())),
+            poll_time_idle: chrono::TimeDelta::seconds(i64::from(
+                defaults::poll_time_idle_seconds(),
+            )),
+            poll_time_window: chrono::TimeDelta::seconds(i64::from(
+                defaults::poll_time_window_seconds(),
+            )),
+            no_server: false,
+            filters: vec![],
         }
     }
 
-    false
+    #[test]
+    fn iteration_timeout_uses_floor_for_short_polling() {
+        let config = test_config();
+        assert_eq!(
+            WatcherType::ActiveWindow.iteration_timeout(&config),
+            ITERATION_TIMEOUT_FLOOR + SERVER_RETRY_BACKOFF_BUDGET
+        );
+    }
+
+    #[test]
+    fn iteration_timeout_uses_base_floor_without_server_reporting() {
+        let mut config = test_config();
+        config.no_server = true;
+        assert_eq!(
+            WatcherType::ActiveWindow.iteration_timeout(&config),
+            ITERATION_TIMEOUT_FLOOR
+        );
+    }
+
+    #[test]
+    fn iteration_timeout_uses_poll_time_when_longer_than_floor() {
+        let mut config = test_config();
+        config.poll_time_idle = chrono::TimeDelta::seconds(20);
+        assert_eq!(
+            WatcherType::Idle.iteration_timeout(&config),
+            Duration::from_secs(20)
+        );
+    }
 }

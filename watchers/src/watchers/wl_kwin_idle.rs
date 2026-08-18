@@ -1,8 +1,7 @@
 use super::idle;
 use super::wl_connection::{subscribe_state, WlEventConnection};
-use super::Watcher;
+use super::{Watcher, WaylandConnectionLost};
 use crate::report_client::ReportClient;
-use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{TimeDelta, Utc};
 use std::sync::Arc;
@@ -81,11 +80,11 @@ impl Watcher for IdleWatcher {
         connection.get_kwin_idle()?;
 
         let timeout = u32::try_from(client.config.idle_timeout.num_milliseconds());
-        let mut watcher_state = WatcherState::new(
-            connection.get_kwin_idle_timeout(timeout.unwrap()).unwrap(),
-            client.config.idle_timeout,
-        );
-        connection.roundtrip(&mut watcher_state).unwrap();
+        let idle_timeout = connection.get_kwin_idle_timeout(timeout.unwrap())?;
+        let mut watcher_state = WatcherState::new(idle_timeout, client.config.idle_timeout);
+        connection
+            .roundtrip(&mut watcher_state)
+            .map_err(WaylandConnectionLost::new)?;
 
         Ok(Self {
             connection,
@@ -96,7 +95,7 @@ impl Watcher for IdleWatcher {
     async fn run_iteration(&mut self, client: &Arc<ReportClient>) -> anyhow::Result<()> {
         self.connection
             .roundtrip(&mut self.watcher_state)
-            .map_err(|e| anyhow!("Event queue is not processed: {e}"))?;
+            .map_err(WaylandConnectionLost::new)?;
 
         client
             .handle_idle_status(self.watcher_state.idle_state.get_reactive(Utc::now())?)
